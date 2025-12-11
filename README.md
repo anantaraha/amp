@@ -18,3 +18,13 @@ The figure above (Figure 1 in the paper) illustrates the full pipeline of our po
     * Evaluation metrics (`./misc/metrics`)
     * Concept selection from section 4.2 in the paper (`./misc/concept_selection`)
     * Setup and usage can be found in its own [README](./misc/README.md)
+
+## Citation
+```
+@inproceedings{wu2025amp,
+  title={On the Feasibility of Poisoning Text-to-Image AI Models via Adversarial Mislabeling},
+  author={Wu, Stanley and Bhaskar, Ronik and Ha, Anna Yoo Jeong and Shan, Shawn and Zheng, Haitao and Zhao, Ben Y},
+  booktitle={ACM SIGSAC Conference on Computer and Communications Security},
+  year={2025},
+}
+```
