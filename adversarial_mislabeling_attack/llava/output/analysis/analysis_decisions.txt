@@ -1,0 +1,61 @@
+Experiment Summary
+
+Exp1 input: /home/anantaraha/amp/adversarial_mislabeling_attack/llava/output/exp1/exp1_layerwise_cosine.csv
+Exp2 directory: /home/anantaraha/amp/adversarial_mislabeling_attack/llava/output/exp2
+Exp1: 400 samples; concept pairs=25; states=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]; missing sample/state combinations=0.
+Exp2: 400 samples; shared sample IDs=400; provenance mismatches=0.
+Scope: recorded samples. Exp1 measures paired target-image representation alignment; Exp2 measures within-condition cross-layer CKA across image observations.
+No class-prediction, caption, causal-effect or per-token outcomes are measured.
+Exp1 uncertainty: pointwise 95% percentile pair_id bootstrap, 5000 replicates, seed 2025; whole units are resampled across states and sample-weighted means retained. Intervals assume approximately independent, representative units; they do not select transition states.
+CKA summaries are descriptive over unique unordered off-diagonal pairs; matrix entries are not independent samples. No sample-level CKA uncertainty is estimated from these aggregate CSVs.
+Blocks: split ordered available encoder states into three near-equal groups; extra states go to earlier groups. Embedding state 0 is separate. Blocks are set before inspecting matrix values.
+exp1: embedding=[0]; early=[1, 2, 3, 4, 5, 6, 7, 8]; middle=[9, 10, 11, 12, 13, 14, 15, 16]; deep=[17, 18, 19, 20, 21, 22, 23, 24]
+exp2: embedding=[0]; early=[1, 2, 3, 4, 5, 6, 7, 8]; middle=[9, 10, 11, 12, 13, 14, 15, 16]; deep=[17, 18, 19, 20, 21, 22, 23, 24]
+Rules: CKA change tolerance=1e-06; consistent cross-block reduction requires negative mean/median beyond tolerance and >= 75% decreasing pairs. Strong deep alignment requires every unique within-deep pair >= 0.8 (declared descriptive threshold).
+Combined later-concentration requires matching sample IDs/image provenance/states and complete Exp1 coverage, deep block mean G positive and larger than both earlier blocks, and larger mean absolute CKA change for encoder pairs touching deep states than for other encoder pairs (differences exceed the tolerance).
+
+Numerical Measurements
+
+Exp1: R=cos(adv,source); T=cos(adv,target); B=cos(source,target); G=T-B; M=T-R. For unit vectors, squared distance=2(1-cosine): 2G is target-distance improvement and 2M is the source-minus-target distance margin.
+Positive suffixes through state 24: 399/400 samples; persistent crossing median=14.0, range=[11, 21].
+Earliest all-sample M > 0 state=unavailable; samples reversing after their first M > 0=0; reversals after earliest all-positive state=unavailable.
+Persistence requires every integer state in the suffix; missing states are not evidence of positivity. The inferred AMP objective is max recorded state - 1, assuming the final returned model state is recorded.
+Objective state 23: 400/400 samples; G mean/median=0.5802/0.5931; M mean/median=0.5339/0.5540; M range=[-0.0864, 0.7258].
+  G>0: 400/400 (100.0%); mean 95% interval=[0.5673, 0.5923].
+  M>0: 399/400 (99.8%); mean 95% interval=[0.5185, 0.5488].
+  Normalized squared target-distance reduction G/(1-B): valid=400, excluded=0 (1-B <= 1e-08); mean=0.8129, median=0.8277, range=[0.3334, 0.9574]. These are fractional distance reductions, not success probabilities.
+
+Exp1 block means (equal weight per recorded state):
+    block  G_mean  M_mean  R_mean  T_mean  B_mean  n_states  all_states_complete
+embedding -0.0130 -0.7105  0.8537  0.1431  0.1561         1                 True
+    early -0.0289 -0.4516  0.7006  0.2490  0.2779         8                 True
+   middle  0.1468 -0.0446  0.3075  0.2629  0.1161         8                 True
+     deep  0.4952  0.4275  0.2672  0.6948  0.1995         8                 True
+
+Exp2 CKA: delta = adversarial - source (means, signed/absolute changes and decrease fractions):
+                     region  n_layer_pairs  source_mean  adversarial_mean  target_mean  delta_mean  delta_median  delta_abs_mean  delta_abs_median  decreased_fraction
+           all_off_diagonal            300       0.6519            0.4328       0.6529     -0.2191       -0.1820          0.2282            0.1820              0.9100
+               within_early             28       0.8371            0.8582       0.8630      0.0211        0.0139          0.0240            0.0139              0.3214
+            early_to_middle             64       0.6585            0.4946       0.6590     -0.1639       -0.1624          0.1639            0.1624              1.0000
+              early_to_deep             64       0.4475            0.0849       0.4408     -0.3626       -0.3863          0.3626            0.3863              1.0000
+              within_middle             28       0.8972            0.6861       0.8880     -0.2111       -0.1960          0.2111            0.1960              1.0000
+             middle_to_deep             64       0.7025            0.3247       0.6855     -0.3778       -0.4348          0.3778            0.4348              1.0000
+                within_deep             28       0.8122            0.7365       0.7894     -0.0757       -0.0848          0.0757            0.0848              1.0000
+       early_middle_to_deep            128       0.5750            0.2048       0.5631     -0.3702       -0.4098          0.3702            0.4098              1.0000
+encoder_pairs_touching_deep            156       0.6176            0.3002       0.6038     -0.3173       -0.3539          0.3173            0.3539              1.0000
+ encoder_pairs_without_deep            120       0.7558            0.6241       0.7600     -0.1317       -0.1302          0.1422            0.1302              0.8417
+
+Strongest signed changes (exact ties: first pair in numerical order):
+direction  available  layer_i  layer_j     delta  tied_pair_count
+ positive       True        0        4  0.128722                1
+ negative       True       10       20 -0.583387                1
+
+Supported Findings
+
+- Positive target-image gain is observed in every sample at 5 states: [20, 21, 22, 23, 24].
+- A common persistent M > 0 state is not established; positive suffixes are verified for 399/400 samples.
+- At inferred objective state 23, the consistent-gain rule (all samples G > 0 and pointwise mean-G interval above zero) is met: G > 0 in 400/400, M > 0 in 399/400; mean-G interval [0.5673, 0.5923].
+- At that state, 25/25 observed concept pairs have positive mean G, 25/25 have positive mean M, and 24 have M > 0 for every member with complete pair coverage.
+- Adversarial early/middle-to-deep CKA meets the consistent-reduction rule: mean change -0.3702, median -0.4098, 128/128 layer pairs decreased (100.0%).
+- Deep adversarial layers do not meet the strong mutual-alignment rule (every off-diagonal CKA >= 0.8): mean 0.7365, minimum 0.4347, 46.4% of pairs meet the threshold.
+- The complementary later-concentration rule is met on matched samples/states: deep states have the largest positive block-mean G, and mean absolute CKA change for encoder pairs touching deep states (0.3173) exceeds that for other encoder pairs (0.1422).

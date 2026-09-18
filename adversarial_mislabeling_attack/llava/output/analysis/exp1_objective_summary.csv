@@ -1,0 +1,2 @@
+objective_layer,available,n_samples,total_samples,G_mean,G_median,G_positive_proportion,M_mean,M_median,M_positive_proportion,M_min,M_max,distance_reduction_valid,distance_reduction_excluded,distance_reduction_mean,distance_reduction_median,distance_reduction_min,distance_reduction_max
+23,True,400,400,0.5801893378794193,0.59309321641922,1.0,0.5338923900201916,0.553953006863594,0.9975,-0.0863843560218811,0.7258380949497225,400,0,0.8128755131690152,0.8276978633674967,0.33338036662775145,0.9574206756603689

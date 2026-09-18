@@ -1,0 +1,2 @@
+rows,samples,pairs,available_layers,duplicate_sample_layers,missing_analysis_values,missing_sample_layer_combinations,samples_covering_all_available_layers,unrecorded_indices_between_0_and_max
+10000,400,25,"[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]",0,0,0,400,[]

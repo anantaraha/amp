@@ -1,0 +1,2 @@
+total_samples,verified_persistent_samples,persistent_state_median,persistent_state_min,persistent_state_max,earliest_all_samples_M_positive,all_samples_persistent_from,samples_reversing_after_first_M_positive,samples_reversing_after_earliest_all_positive
+400,399,14.0,11,21,,,0,
