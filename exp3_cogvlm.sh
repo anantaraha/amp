@@ -32,6 +32,7 @@ srun python "$COGVLM/exp3.py" \
     --cache-dir "$CACHE" \
     --output-dir "$EXP3_OUT" \
     --cache-only \
+    --cka both \
     --no-per-image-plots
 
 echo "=== Exp3 completed successfully ==="

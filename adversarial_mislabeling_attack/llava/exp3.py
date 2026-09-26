@@ -42,7 +42,7 @@ def cuda_device(value):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Single-image centered linear CKA across patch tokens: S_gap = A_DD - A_MD.",
+        description="Single-image centered linear or RBF CKA across patch tokens: S_gap = A_DD - A_MD.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog="CLI paths are working-directory-relative; image paths in CSVs are repository-root-relative. "
                "Reuse full-token Exp1 caches; CUDA/FP16 extraction is needed only for missing/invalid caches. "
@@ -61,6 +61,9 @@ def parse_args(argv=None):
                         help="CUDA device for missing representation extraction; cache-only computation needs no GPU.")
     parser.add_argument("--max-samples", type=positive_integer, default=None,
                         help="Process the first N manifest rows, including skipped rows; omitted means all.")
+    parser.add_argument("--cka", choices=("linear", "rbf", "both"), default="linear",
+                        help="CKA kernel; RBF uses a per-image/per-layer median patch-distance bandwidth. "
+                             "Both reuses the linear pass's caches and writes separate exp3_rbf_* outputs.")
     cache_options = parser.add_mutually_exclusive_group()
     cache_options.add_argument("--cache-only", action="store_true",
                                help="Skip triplets with missing/invalid caches instead of loading a model.")
@@ -308,6 +311,59 @@ def token_cka_matrix(states):
     return matrix
 
 
+def token_rbf_cka_matrix(states):
+    """Centered RBF CKA across patch-token observations of a single image.
+
+    For EACH layer/image, sigma = median(||x_i - x_j||_2 for i < j), with
+    the diagonal excluded and duplicate-token distances retained. Then
+    K_ij = exp(-||x_i - x_j||_2**2 / (2 * sigma**2)). Compare HKH matrices
+    using their Frobenius-normalized inner products, as for linear CKA.
+    A zero/nonfinite median bandwidth is undefined and rejects the triplet;
+    no arbitrary bandwidth floor or cross-image bandwidth is substituted.
+    """
+    import numpy as np
+
+    normalized_grams = []
+    patch_count = None
+    for layer, state in enumerate(states):
+        features = state[0, 1:, :].detach().cpu().numpy().astype(np.float64)
+        if features.ndim != 2 or features.shape[0] < 2 or not np.isfinite(features).all():
+            raise ValueError(f"Invalid patch-token features at layer {layer}")
+        if patch_count is not None and features.shape[0] != patch_count:
+            raise ValueError("Layers must use the same spatial token observations")
+        patch_count = features.shape[0]
+        # Translation does not change distances; centering improves numerical stability.
+        features -= features.mean(axis=0, keepdims=True)
+        products = features @ features.T
+        squared_norms = np.diag(products).copy()
+        squared_distances = squared_norms[:, None] + squared_norms[None, :] - 2 * products
+        np.maximum(squared_distances, 0, out=squared_distances)
+        np.fill_diagonal(squared_distances, 0)
+        distances = np.sqrt(squared_distances[np.triu_indices(patch_count, k=1)])
+        sigma = float(np.median(distances))
+        if not np.isfinite(sigma) or sigma <= 0:
+            raise ValueError(f"Undefined RBF CKA at layer {layer}: zero/nonfinite median pairwise distance")
+        gram = np.exp(-squared_distances / (2 * sigma ** 2))
+        # Explicit double centering, H K H, over token observations.
+        row_means = gram.mean(axis=1, keepdims=True)
+        column_means = gram.mean(axis=0, keepdims=True)
+        grand_mean = gram.mean()
+        gram -= row_means
+        gram -= column_means
+        gram += grand_mean
+        norm = np.linalg.norm(gram)
+        if not np.isfinite(norm) or norm == 0:
+            raise ValueError(f"Undefined RBF CKA at layer {layer}: zero/nonfinite centered kernel norm")
+        normalized_grams.append((gram / norm).ravel())
+    if not normalized_grams:
+        raise ValueError("No layers to compare")
+    grams = np.stack(normalized_grams)
+    matrix = grams @ grams.T
+    if not np.isfinite(matrix).all():
+        raise ValueError("Nonfinite RBF token CKA matrix")
+    return matrix
+
+
 def gap_scores(matrix, middle, deep):
     import numpy as np
 
@@ -387,39 +443,43 @@ def draw_cka_heatmap(axis, matrix, blocks, title, difference=False, bound=1):
     axis.figure.colorbar(image, ax=axis, label="Token CKA difference" if difference else "Token CKA")
 
 
-def save_per_image_plot(matrix, blocks, sample_id, condition, output_path):
+def save_per_image_plot(matrix, blocks, sample_id, condition, output_path, cka="linear"):
     import matplotlib.pyplot as plt
 
     fig, axis = plt.subplots(figsize=(9, 8))
     try:
-        draw_cka_heatmap(axis, matrix, blocks, f"{sample_id} — {condition}\nSingle-image patch-token CKA")
+        kernel_label = "RBF " if cka == "rbf" else ""
+        draw_cka_heatmap(axis, matrix, blocks, f"{sample_id} — {condition}\nSingle-image patch-token {kernel_label}CKA")
         fig.tight_layout()
         save_figure(fig, output_path)
     finally:
         plt.close(fig)
 
 
-def save_aggregate_plot(means, delta, blocks, count, output_path):
+def save_aggregate_plot(means, delta, blocks, count, output_path, cka="linear"):
     import matplotlib.pyplot as plt
     import numpy as np
 
+    kernel_label = "RBF " if cka == "rbf" else ""
     fig, axes = plt.subplots(2, 2, figsize=(18, 15))
     try:
         for axis, condition in zip(axes.flat, CONDITIONS):
             draw_cka_heatmap(axis, means[condition], blocks,
-                             f"{condition.title()}: mean single-image token CKA (N={count})")
+                             f"{condition.title()}: mean single-image token {kernel_label}CKA (N={count})")
         bound = max(float(np.max(np.abs(delta))), np.finfo(np.float64).eps)
         draw_cka_heatmap(axes[1, 1], delta, blocks,
-                         f"Adversarial − source mean token CKA (N={count})", difference=True, bound=bound)
+                         f"Adversarial − source mean token {kernel_label}CKA (N={count})", difference=True, bound=bound)
         fig.tight_layout()
         save_figure(fig, output_path)
     finally:
         plt.close(fig)
 
 
-def run_experiment(args):
+def _run_experiment(args, cka="linear"):
     import numpy as np
     import pandas as pd
+
+    prefix = "exp3" if cka == "linear" else "exp3_rbf"
 
     if args.plots:
         import matplotlib
@@ -432,6 +492,8 @@ def run_experiment(args):
     print(f"Shared full-token cache: {args.cache_dir.resolve()}")
     print(f"Outputs: {args.output_dir.resolve()}")
     print("CKA observations: patch tokens within one image; CLS excluded. S_gap = A_DD - A_MD.", flush=True)
+    if cka == "rbf":
+        print("RBF kernel: sigma = median off-diagonal Euclidean patch distance per image/layer.", flush=True)
     representations = Representations(args)
     fingerprints, sums = {}, {}
     rows, skipped, plot_errors = [], [], []
@@ -465,7 +527,7 @@ def run_experiment(args):
                     raise ValueError("Layer/token layout differs from previously analyzed samples")
                 current_signature = state_signature
                 current_blocks, middle, deep = layer_blocks(len(states))
-                matrix = token_cka_matrix(states)
+                matrix = token_cka_matrix(states) if cka == "linear" else token_rbf_cka_matrix(states)
                 del states
                 matrices[condition] = matrix
                 sample_rows.append({
@@ -493,10 +555,10 @@ def run_experiment(args):
         for condition in CONDITIONS:
             sums[condition] += matrices[condition]
             if args.plots and args.per_image_plots:
-                filename = f"{sample_index:06d}_{cache_name(sample_id)[:-3]}_{condition}.png"
+                filename = f"{'rbf_' if cka == 'rbf' else ''}{sample_index:06d}_{cache_name(sample_id)[:-3]}_{condition}.png"
                 try:
                     save_per_image_plot(matrices[condition], blocks, sample_id, condition,
-                                        args.output_dir / "per_image" / filename)
+                                        args.output_dir / "per_image" / filename, cka=cka)
                 except Exception as error:
                     plot_errors.append({"sample_id": sample_id, "condition": condition, "error": str(error)})
                     warnings.warn(f"Could not plot {sample_id}/{condition}: {error}")
@@ -504,10 +566,10 @@ def run_experiment(args):
     columns = [*PROVENANCE, "condition", "image_id", "image_path", "attack_status", "cache_path", "cache_validation",
                "n_layers", "n_patch_tokens", *METRICS]
     results = pd.DataFrame(rows, columns=columns)
-    score_path = args.output_dir / "exp3_image_scores.csv"
+    score_path = args.output_dir / f"{prefix}_image_scores.csv"
     save_csv(results, score_path, index=False)
     save_csv(pd.DataFrame(skipped, columns=["sample_id", "pair_id", "reason"]),
-             args.output_dir / "exp3_skipped_samples.csv", index=False)
+             args.output_dir / f"{prefix}_skipped_samples.csv", index=False)
     metadata = {
         "experiment": "Single-image centered linear CKA across spatial patch-token observations",
         "model_id": MODEL_ID, "cache_version": CACHE_VERSION,
@@ -531,37 +593,74 @@ def run_experiment(args):
                           "Exp2 uses images as observations and does not establish this per-image hypothesis.",
         "plot_errors": plot_errors,
     }
-    (args.output_dir / "exp3_run.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    if cka == "rbf":
+        metadata.update(
+            experiment="Single-image centered RBF CKA across spatial patch-token observations",
+            cka_estimator="biased centered RBF CKA",
+            rbf_kernel="exp(-squared_distance / (2 * sigma**2))",
+            rbf_bandwidth="For each image/layer independently: sigma is the median Euclidean distance "
+                          "over unique unordered off-diagonal patch-token pairs; zero distances are retained.",
+            rbf_degenerate_policy="Skip the whole RBF triplet if any layer has zero/nonfinite median "
+                                  "distance or zero/nonfinite centered kernel norm; linear results are independent.",
+        )
+    (args.output_dir / f"{prefix}_run.json").write_text(json.dumps(metadata, indent=2) + "\n")
     print(f"Summary: analyzed={analyzed}, skipped={len(skipped)}, cache={representations.cache_counts}")
     print(f"Image scores: {score_path.resolve()}")
-    print(f"Skipped samples: {(args.output_dir / 'exp3_skipped_samples.csv').resolve()}")
+    print(f"Skipped samples: {(args.output_dir / f'{prefix}_skipped_samples.csv').resolve()}")
     if analyzed == 0:
-        raise RuntimeError("No complete valid triplets remain; see exp3_skipped_samples.csv. Aggregate outputs unavailable.")
+        raise RuntimeError(f"No complete valid triplets remain; see {prefix}_skipped_samples.csv. Aggregate outputs unavailable.")
 
     counts = results.groupby("sample_id").condition.agg(list)
     if results.duplicated(["sample_id", "condition"]).any() or any(value != list(CONDITIONS) for value in counts):
         raise ValueError("Unmatched conditions in image score results")
-    save_csv(summarize_scores(results, "condition"), args.output_dir / "exp3_condition_summary.csv", index=False)
+    save_csv(summarize_scores(results, "condition"), args.output_dir / f"{prefix}_condition_summary.csv", index=False)
     differences = paired_differences(results)
-    save_csv(differences, args.output_dir / "exp3_paired_differences.csv", index=False)
-    save_csv(summarize_scores(differences, "comparison"), args.output_dir / "exp3_paired_summary.csv", index=False)
+    save_csv(differences, args.output_dir / f"{prefix}_paired_differences.csv", index=False)
+    save_csv(summarize_scores(differences, "comparison"), args.output_dir / f"{prefix}_paired_summary.csv", index=False)
     save_csv(pd.DataFrame({"layer": list(blocks), "block": list(blocks.values())}),
-             args.output_dir / "exp3_layer_blocks.csv", index=False)
+             args.output_dir / f"{prefix}_layer_blocks.csv", index=False)
     labels = ["Emb." if layer == 0 else str(layer) for layer in blocks]
     means = {condition: sums[condition] / analyzed for condition in CONDITIONS}
     delta = means["adversarial"] - means["source"]
     for condition, matrix in {**means, "adv_minus_source": delta}.items():
         save_csv(pd.DataFrame(matrix, index=labels, columns=labels),
-                 args.output_dir / f"exp3_mean_token_cka_{condition}.csv", index_label="layer")
+                 args.output_dir / f"{prefix}_mean_token_cka_{condition}.csv", index_label="layer")
     if args.plots:
-        save_aggregate_plot(means, delta, blocks, analyzed, args.output_dir / "exp3_token_cka_four_panel.png")
+        save_aggregate_plot(means, delta, blocks, analyzed, args.output_dir / f"{prefix}_token_cka_four_panel.png", cka=cka)
     print(f"Condition/paired summaries, mean CKA matrices, layer groups, and run metadata: {args.output_dir.resolve()}")
     if args.plots:
-        print(f"Aggregate figure: {(args.output_dir / 'exp3_token_cka_four_panel.png').resolve()}")
+        print(f"Aggregate figure: {(args.output_dir / f'{prefix}_token_cka_four_panel.png').resolve()}")
         if args.per_image_plots:
             print(f"Per-image figures: {(args.output_dir / 'per_image').resolve()}")
     if plot_errors:
-        print(f"Per-image plotting errors: {len(plot_errors)} (details in exp3_run.json)")
+        print(f"Per-image plotting errors: {len(plot_errors)} (details in {prefix}_run.json)")
+    return results
+
+
+def run_experiment(args):
+    """Keep the original linear pass; RBF uses its own results and skip accounting."""
+    cka = getattr(args, "cka", "linear")
+    if cka not in ("linear", "rbf", "both"):
+        raise ValueError("cka must be linear, rbf, or both")
+    if cka != "both":
+        return _run_experiment(args, cka)
+
+    results, failures = {}, []
+    for kernel in ("linear", "rbf"):
+        kernel_args = argparse.Namespace(**vars(args))
+        if kernel == "rbf":
+            # The linear pass already refreshed requested caches. Reuse them so
+            # --cka both --force-recompute-representations does not extract twice.
+            kernel_args.force_recompute_representations = False
+        print(f"=== {kernel.upper()} single-image token CKA ===", flush=True)
+        try:
+            results[kernel] = _run_experiment(kernel_args, kernel)
+        except RuntimeError as error:
+            # Save both kernels' diagnostics even if one has no valid triplets.
+            failures.append((kernel, error))
+            warnings.warn(f"{kernel.upper()} CKA did not complete: {error}")
+    if failures:
+        raise RuntimeError("; ".join(f"{kernel}: {error}" for kernel, error in failures)) from failures[0][1]
     return results
 
 
