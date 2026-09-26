@@ -16,7 +16,7 @@ source adversarial_mislabeling_attack/xgen_mm/.venv/bin/activate
 
 export SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
 export REQUESTS_CA_BUNDLE=/etc/pki/tls/certs/ca-bundle.crt
-export HF_HOME=/data/anantaraha/huggingface
+export HF_HOME=/general/anantaraha/huggingface
 
 DATA=/data/anantaraha/amp/dataset/laion_art
 
