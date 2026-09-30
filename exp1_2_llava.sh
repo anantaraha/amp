@@ -21,9 +21,9 @@ export HF_HOME=/data/anantaraha/huggingface
 DATA=/data/anantaraha/amp/dataset/laion_art
 LLAVA=adversarial_mislabeling_attack/llava
 
-EXP1_OUT="$DATA/output/exp1"
-EXP2_OUT="$DATA/output/exp2"
-ANALYSIS_OUT="$DATA/output/analysis"
+EXP1_OUT="$DATA/output/llava/exp1"
+EXP2_OUT="$DATA/output/llava/exp2"
+ANALYSIS_OUT="$DATA/output/llava/analysis"
 CACHE="$DATA/attack_set/representations/llava_1_5_7b"
 
 # Fresh result directories; representation cache is preserved.
