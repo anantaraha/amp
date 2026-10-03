@@ -28,7 +28,7 @@ DIAG_WIDTH="${DIAG_WIDTH:-0}"
 mkdir -p "$OUTPUT"
 
 echo "=== LLaVA Exp4: linear + RBF, k=$DIAG_WIDTH ==="
-srun python -u "$MODEL/exp4.py" \
+srun python -u exp4.py --vlm llava \
     --manifest "$DATA/attack_set/manifest.csv" \
     --attack-results "$DATA/attack_set/llava/attack_results.csv" \
     --cache-dir "$CACHE" \

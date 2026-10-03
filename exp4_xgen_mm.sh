@@ -28,7 +28,7 @@ DIAG_WIDTH="${DIAG_WIDTH:-0}"
 mkdir -p "$OUTPUT"
 
 echo "=== xGen-MM Exp4: linear + RBF, k=$DIAG_WIDTH ==="
-srun python -u "$MODEL/exp4.py" \
+srun python -u exp4.py --vlm xgen_mm \
     --manifest "$DATA/attack_set/manifest.csv" \
     --attack-results "$DATA/attack_set/xgen_mm/attack_results.csv" \
     --cache-dir "$CACHE" \
