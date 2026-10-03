@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manifest-driven AMP generation using the three local author attack definitions."""
+"""Manifest-driven AMP generation: three local author attacks plus Qwen2.5-VL."""
 
 import argparse
 from fractions import Fraction
@@ -15,6 +15,8 @@ ATTACK_DEFAULTS = {
     "llava": {"optimization_steps": 4000, "initial_lr": 0.005},
     "cogvlm": {"optimization_steps": 2000, "initial_lr": 0.003},
     "xgen_mm": {"optimization_steps": 2000, "initial_lr": 0.01},
+    # New experimental settings, using the xGen-MM schedule; not author Qwen defaults.
+    "qwen25_vl": {"optimization_steps": 2000, "initial_lr": 0.01},
 }
 
 
@@ -54,11 +56,12 @@ def parse_args(argv=None):
         description="Generate AMP perturbations from a common manifest into separate VLM directories.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         epilog="Author defaults: llava=4000 steps / LR 0.005; cogvlm=2000 / 0.003; "
-               "xgen_mm=2000 / 0.01. CUDA is required for generation. "
+               "xgen_mm=2000 / 0.01. Qwen experimental defaults: 2000 / 0.01; final merged vision tokens. "
+               "CUDA is required for generation. "
                "CLI paths are relative to your working directory; paths inside the manifest are repository-root-relative.",
     )
     parser.add_argument("--vlm", choices=list(ATTACK_DEFAULTS), default="llava",
-                        help="VLM whose author-defined AMP attack to use.")
+                        help="VLM whose AMP attack to use; Qwen is a new adaptation.")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_ATTACK_ROOT / "manifest.csv",
                         help="Common source/target sample manifest CSV.")
     parser.add_argument("--output-root", type=Path, default=DEFAULT_ATTACK_ROOT,
@@ -66,16 +69,22 @@ def parse_args(argv=None):
     parser.add_argument("--budget", type=budget_value, default=16 / 255,
                         help="L-infinity perturbation budget in [0,1], as decimal or fraction; default 16/255.")
     parser.add_argument("--optimization-steps", type=positive_integer, default=None,
-                        help="Override iteration count; omitted uses the selected VLM's author default.")
+                        help="Override iteration count; omitted uses the selected VLM's default.")
     parser.add_argument("--initial-lr", type=positive_float, default=None,
-                        help="Override initial learning rate; omitted uses the selected VLM's author default.")
+                        help="Override initial learning rate; omitted uses the selected VLM's default.")
     parser.add_argument("--max-attacks", type=positive_integer, default=None,
                         help="Process only the first N manifest rows, including rows skipped on resume; omitted means all.")
     parser.add_argument("--device", type=cuda_device, default="cuda",
                         help="CUDA device for the selected model and input tensors.")
     parser.add_argument("--verbose", action="store_true",
                         help="Show the per-image optimization progress bar.")
+    parser.add_argument("--qwen-min-pixels", type=positive_integer, default=3136,
+                        help="Qwen-only smart-resize minimum area; matches Exp4. Use the same limits for evaluation.")
+    parser.add_argument("--qwen-max-pixels", type=positive_integer, default=12845056,
+                        help="Qwen-only smart-resize maximum area; matches Exp4. Smaller grids reduce attack memory.")
     args = parser.parse_args(argv)
+    if args.vlm == "qwen25_vl" and args.qwen_min_pixels > args.qwen_max_pixels:
+        parser.error("--qwen-min-pixels must not exceed --qwen-max-pixels")
     for setting, default in ATTACK_DEFAULTS[args.vlm].items():
         if getattr(args, setting) is None:
             setattr(args, setting, default)
@@ -159,7 +168,101 @@ class XgenMMAttack:
         return self.vision_encoder(self.transform(image_tensor).unsqueeze(0))[1]
 
 
-def load_attack(vlm, device):
+class Qwen25VLAttack:
+    """Attack final spatial-merger tokens with the shared AMP feature-distance loss.
+
+    Exp4's Qwen backend owns the pinned checkpoint, BF16/SDPA vision loading and
+    native visual forward. Its final output has no CLS token and is already in
+    merged-grid raster order after undoing the internal window permutation.
+    No language-model states, pooling or additional token permutation are used.
+
+    PIL/NumPy preprocessing would sever pixel gradients. The tensor path below
+    keeps official smart-resize dimensions, normalization, still-frame temporal
+    duplication and patch packing. Antialiased bicubic interpolation is clamped
+    to [0,1], but omits PIL's intermediate 8-bit rounding; it is deliberately not
+    bit-identical to Exp4's official PIL preprocessing. Attack pixels/modifiers
+    stay FP32; only packed model inputs are cast to the backend's BF16 precision.
+    """
+
+    def __init__(self, device, min_pixels=3136, max_pixels=12845056):
+        import torch
+        from types import SimpleNamespace
+        from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
+        from exp4 import QwenRepresentations
+
+        self.device = device
+        self.input_dtype = torch.float32
+        self.backend = QwenRepresentations(SimpleNamespace(
+            device=str(device), local_files_only=False,
+            qwen_min_pixels=min_pixels, qwen_max_pixels=max_pixels,
+        ))
+        self.backend.initialize()
+        # Freeze weights, not the visual forward: gradients must reach attack pixels.
+        self.backend.model.requires_grad_(False)
+        self.processor = self.backend.processor
+        self.smart_resize = smart_resize
+        self.geometries = {}
+        self.mean = torch.tensor(self.processor.image_mean, device=device, dtype=torch.float32).view(3, 1, 1)
+        self.std = torch.tensor(self.processor.image_std, device=device, dtype=torch.float32).view(3, 1, 1)
+        print("Qwen AMP: final spatial-merger tokens; differentiable tensor preprocessing; "
+              f"pixel limits={min_pixels}..{max_pixels} (use these limits in Exp4).", flush=True)
+
+    def geometry(self, image_tensor):
+        import torch
+
+        if image_tensor.ndim != 3 or image_tensor.shape[0] != 3:
+            raise ValueError("Qwen AMP requires the prepared RGB source/target images ([3,H,W])")
+        shape = tuple(image_tensor.shape[-2:])
+        if shape not in self.geometries:
+            patch = self.processor.patch_size
+            height, width = self.smart_resize(
+                *shape, factor=patch * self.processor.merge_size,
+                min_pixels=self.processor.min_pixels, max_pixels=self.processor.max_pixels,
+            )
+            grid = torch.tensor([[1, height // patch, width // patch]], device=self.device, dtype=torch.long)
+            self.geometries[shape] = (height, width, grid)
+        return self.geometries[shape]
+
+    def validate_pair(self, source, target):
+        # Elementwise token distance needs matching spatial grids, not just equal
+        # token counts. Reject mismatches instead of resizing targets or broadcasting.
+        if self.geometry(source)[:2] != self.geometry(target)[:2]:
+            raise ValueError("Qwen source/target smart-resize grids differ; tokenwise AMP requires matching grids")
+
+    def preprocess_tensor(self, image_tensor):
+        import torch.nn.functional as F
+
+        height, width, grid = self.geometry(image_tensor)
+        pixels = F.interpolate(image_tensor.float().unsqueeze(0), size=(height, width),
+                               mode="bicubic", align_corners=False, antialias=True)[0].clamp(0, 1)
+        # ToTensor has already rescaled RGB bytes to [0,1]; do not divide by 255 again.
+        pixels = (pixels - self.mean) / self.std
+        patch, temporal, merge = (self.processor.patch_size, self.processor.temporal_patch_size,
+                                  self.processor.merge_size)
+        grid_h, grid_w = height // patch, width // patch
+        frames = pixels.unsqueeze(0).expand(temporal, -1, -1, -1)
+        # Exactly the official Qwen2VLImageProcessor packing for one still image:
+        # [t,h/merge,w/merge,merge,merge,channel,temporal,patch_h,patch_w].
+        packed = frames.reshape(1, temporal, 3, grid_h // merge, merge, patch,
+                                grid_w // merge, merge, patch).permute(0, 3, 6, 4, 7, 2, 1, 5, 8)
+        packed = packed.reshape(grid_h * grid_w, 3 * temporal * patch * patch)
+        return packed.to(dtype=self.backend.dtype), grid
+
+    def features(self, image_tensor):
+        import torch
+
+        # The target is evaluated once by the unchanged shared PGD loop. Its input
+        # does not require gradients; adversarial inputs retain the full graph.
+        with torch.set_grad_enabled(torch.is_grad_enabled() and image_tensor.requires_grad):
+            pixels, grid = self.preprocess_tensor(image_tensor)
+            output = self.backend.forward_visual(pixels, grid)
+            expected_tokens = pixels.shape[0] // self.processor.merge_size ** 2
+            if output.shape != (expected_tokens, self.backend.model.config.out_hidden_size):
+                raise ValueError("Unexpected Qwen spatial-merger output shape")
+            return output.float().unsqueeze(0)
+
+
+def load_attack(vlm, device, *, qwen_min_pixels=3136, qwen_max_pixels=12845056):
     import torch
 
     if not torch.cuda.is_available():
@@ -168,6 +271,8 @@ def load_attack(vlm, device):
     if device.index is not None and device.index >= torch.cuda.device_count():
         raise ValueError(f"CUDA device {device} is unavailable")
     print(f"Loading {vlm} once on {device}...", flush=True)
+    if vlm == "qwen25_vl":
+        return Qwen25VLAttack(device, min_pixels=qwen_min_pixels, max_pixels=qwen_max_pixels)
     return {"llava": LlavaAttack, "cogvlm": CogvlmAttack, "xgen_mm": XgenMMAttack}[vlm](device)
 
 
@@ -184,6 +289,8 @@ def generate_perturbation(attack, source_path, target_path, output_path, args):
     modifier = torch.clone(source_tensor) * 0.1
     with Image.open(target_path) as target_image:
         target_tensor = to_tensor(target_image).to(device=attack.device, dtype=attack.input_dtype)
+    if args.vlm == "qwen25_vl":
+        attack.validate_pair(source_tensor, target_tensor)
     target_feature = attack.features(target_tensor)
 
     for i in tqdm(range(args.optimization_steps), desc=f"[{args.vlm}]: generating perturbation",
@@ -276,7 +383,9 @@ def run(args):
 
     # Model startup errors remain fatal, as in the notebook. Never repeatedly load per sample.
     needs_generation = any(not is_valid_image(adv_dir / f"{sample_id}.png") for sample_id in rows.sample_id)
-    attack = load_attack(args.vlm, args.device) if needs_generation else None
+    qwen_options = {"qwen_min_pixels": args.qwen_min_pixels, "qwen_max_pixels": args.qwen_max_pixels} \
+        if args.vlm == "qwen25_vl" else {}
+    attack = load_attack(args.vlm, args.device, **qwen_options) if needs_generation else None
     records = []
     core = ["sample_id", "source_path", "target_path", "adv_path", "status", "error"]
     extra = ["manifest_source_path", "manifest_target_path", "vlm"]
