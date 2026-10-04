@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH -p Quick
+#SBATCH -p general
 #SBATCH --job-name=amp_qwen25_vl
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
@@ -25,5 +25,4 @@ srun python -u generate_amp_perturbations.py \
     --manifest "$DATA/attack_set/manifest.csv" \
     --output-root "$DATA/attack_set" \
     --device cuda \
-    --max-attacks 2 \
     --verbose
